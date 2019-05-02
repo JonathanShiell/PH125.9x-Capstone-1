@@ -1,0 +1,812 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+title: "PH125.9x Capstone Part 1 - MovieLens Project"
+author: "Jonathan Shiell"
+---
+
+Files also at [https://github.com/JonathanShiell/PH125.9x-Capstone-1](https://github.com/JonathanShiell/PH125.9x-Capstone-1)
+
+```{r Load Dataset, include=FALSE}
+
+# Create test and validation sets
+
+#############################################################
+# Create edx set, validation set, and submission file       #
+#############################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", 
+                                         repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- read.table(text = gsub("::", "\t",
+                                  readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% 
+  mutate(movieId = as.numeric(levels(movieId))[movieId],
+         title = as.character(title),
+         genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+     semi_join(edx, by = "movieId") %>%
+     semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+movielens_set <- movielens
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+```{R Load packages, include=FALSE}
+#Load packages
+library(tidyverse)
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+library(kableExtra)
+#library(caret)
+dslabs::ds_theme_set()
+
+theme(plot.title = element_text(hjust = 0.5))
+```
+
+# Introduction
+
+## An Introduction to the Dataset
+
+For the purposes of this project, the dataset is divided into a training set `edx` and a test set `validation`. All values of `userId` and `movieId` in the test set `validation` are contained in the training set `edx`. These were prepared using code supplied by the edx PH125.9x course website.
+
+The dataset being used is the MovieLens 10M dataset, provided by GroupLens . It features a total of approximately ten million unique ratings, each of which are considered to be an observation.
+
+| Variable Name | Description                                                  |
+| ------------- | ------------------------------------------------------------ |
+| `userId`      | Unique, anonymised user identifier (as integer)              |
+| `movieId`     | Unique movie identifier (as integer)                         |
+| `rating`      | Rating score given, from 0.5 to 5.0 in increments of 0.5     |
+| `timestamp`   | Timestamp at the time that the rating was given (as integer) |
+| `title`       | Movie Title including year in brackets at end.               |
+| `genres`      | Genres of Movie, separated by `|` for multiple genres        |
+
+Observations are stored row-wise, in accordance with the 'tidy' principles proposed by Wickham (2014). Let us consider the first six items of the training set `edx`:
+
+```{r echo=FALSE}
+head(edx) %>% 
+  mutate(title = str_trunc(title,37), genres = str_trunc(genres,25)) %>% 
+  kable(format = 'markdown')
+```
+
+```{r include=FALSE}
+training_n <- nrow(edx)
+test_n <- nrow(validation)
+total_n <- training_n + test_n
+```
+
+The dataset consists of a total of `r total_n` items, with `r training_n` items in the training set `edx` and `r test_n` items in the test set `validation`. There are a total of `r total_n` items in the combined dataset.
+
+\pagebreak
+### Dependent Variable (Rating, Training Set only)
+
+```{R include=FALSE}
+#Obtain mean rating
+
+mu = mean(edx$rating)
+
+# Additionally obtain the standard deviation
+sd_rating <- sd(edx$rating)
+```
+
+The dependent variable `rating` in the training set has a minimum of `r min(edx$rating)`, a maximum of `r max(edx$rating)`, a mean of `r mu` and a standard deviation of `r sd_rating`. The variable `mu` (population mean $\mu$ of the training set) will be retained for use later. The frequencies of each rating score given are as follows:
+
+```{R echo=FALSE}
+rating_table <- table(edx$rating)
+rating_levels <- rating_table %>% as.data.frame()
+colnames(rating_levels) <- c('Rating','Frequency of Rating')
+rating_levels %>% kable(format = 'markdown')
+```
+
+This may also be plotted on a bar chart:
+
+```{R echo=FALSE}
+rating_bars <- rating_table
+names(rating_bars) <- names(rating_bars) %>% as.character()
+
+barplot(rating_table,main='Bar Plot of rating variable in training set',
+        xlab = 'Rating Given', ylab = 'Frequency',
+        ylim = c(0,3000000))
+abline(0,0)
+```
+
+\pagebreak
+### Independent Variables (Training Set only)
+
+```{R Unique Counts, include=FALSE}
+movie_count <- edx$movieId %>% unique() %>% length()
+user_count <- edx$userId %>% unique() %>% length()
+tstamp_count <- edx$timestamp %>% unique() %>% length()
+title_count <- edx$title %>% unique() %>% length()
+genres_count <- edx$genres %>% unique() %>% length()
+
+unique_counts <- rbind(movie_count,user_count,tstamp_count,
+                   title_count,genres_count)
+
+colnames(unique_counts) <- ''
+rownames(unique_counts) <- c ('Number of unique movieId values',
+                                'Number of unique userId values',
+                                'Number of unique timestamps',
+                                'Number of unique titles',
+                                'Number of unique genre combinations')
+
+```
+
+|                                     |                  | 
+|-------------------------------------|------------------| 
+| Number of unique movieId values     | `r movie_count`  | 
+| Number of unique userId values      | `r user_count`   | 
+| Number of unique timestamps         | `r tstamp_count` | 
+| Number of unique titles             | `r title_count`  | 
+| Number of unique genre combinations | `r genres_count` | 
+
+The independent variables, including integers, are factors that are not ranked, and therefore are free to be assigned any value. In particular, it may be observed that there are `r movie_count` unique movies and `r user_count` unique users. This means that there are `r movie_count*user_count` possible combinations. Given that there are `r training_n` total items in the training set, there are approximately `r round((movie_count * user_count)/training_n)` times more unique movie/user pairs than in the training set.
+
+
+```{R include=FALSE}
+single_genres <- 
+unique(edx$genres) %>% str_split(pattern = "\\|") %>%  unlist()%>% unique()
+```
+
+We may derive additional information from the `genre` vector.
+Genres are separated by the pipe character `|`; there are `r length(single_genres)` total unique genres described. In the GroupLens published description, they are described as: Action, Adventure, Animation, Children, Comedy, Crime, Documentary, Drama, Fantasy, Film-Noir, Horror, Musical, Mystery, Romance, Sci-Fi, Thriller, War and Western. In addition, the elements `IMAX` and `(no genres listed)` are present.
+
+\pagebreak
+## Introduction to Methods Used
+### Estimation of Movie and User Bias
+
+Bias is considered to be the preference shown on average across, for a particular movie (described as $b_i$) and by users after movie bias has been taken into account ($b_u$). The simplest method of determining movie bias is using the formula:
+$$
+b_i = \frac{\sum\limits_i(y_i-\mu)}{n_i}
+$$
+where $y$ is the individual rating given to a movie by an individual user, $Y$ is the vector of all items of $y$ that may be indexed by user and/or movie identification number, $\mu$ is the population mean over the training set and $n_i$ is the number of ratings received by that movie. This is applied movie-wise, and may be simplified for computation purposes by calculating the grouped mean of $(Y_i - \mu)$ for a particular movie if regularisation is not required. This is based on the following model
+$$
+Y_i = \mu + b_i + \epsilon_{u,i}
+$$
+where $\epsilon_{u,i}$ is the error function, i.e. the difference between an observed value of the dependent variable and the relevant predicted value that is explained by the known independent values by application to the model of interest.
+
+A similar formula may be used to determine user bias, if required, as a second step:
+$$
+b_u = \frac{\sum\limits_{u,i}(y_u-(\mu + b_i))}{n_{user}}
+$$
+where $Y_u$ is the rating given by a particular user to a specific movie, $b_u$ is the user bias, $n_{user}$ is the number of ratings per user and all other symbols are as per the previous equation. This is applied user-wise, using different values of $b_i$ based upon each movie as appropriate, and may be simplified as the mean of $Y_u-(\mu + b_i)$ for a particular user if regularisation is not required. This is based on the following model:
+
+$$
+Y_{u,i} = \mu + b_i + b_u + \epsilon
+$$
+
+Biases are applied in the following, regression-like manner, for movie bias effect only and for movie and user bias effect respectively, in order to predict the rating for a specified movie. These are applied to the test set, by rating event, in order to obtain predicted values as follows:
+$$
+\hat{y}_i = \mu + b_i
+$$
+
+$$
+\hat{y}_{u,i} = \mu + b_i + b_u
+$$
+
+### Measurement of Model Error
+
+Performance will be measured by the use of root mean standard error (RMSE). This is determined as the square root of the mean of the square of the difference between an observed value and that predicted for the training set, i.e.
+$$
+RMSE = \sqrt{\frac{1}{N}\sum (y-\hat{y})^2}
+$$
+
+where $y$ represents an observed value in the test set, $\hat{y}$ represents the corresponding expected value, and $N$ represents the number of items being considered. This may be simplified to the square root of the mean of $(Y-\hat{Y})^2$ for computation purposes, where $Y$ and $\hat{Y}$ are the vectors of $y$ and the aligned corresponding values of $\hat{y}$ respectively.
+
+\pagebreak
+This may be computed in R using function such as:
+
+```{R}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+This uses R's in-built vector arithmetic capabilities.
+*Source: Irizarry(2019)*
+
+A lower value of RMSE represents a dataset that, on average, is more accurate. This method places a greater emphasis on outliers than on other measures of total error, and therefore penalises larger variations between observed and expected values to a greater extent than smaller variations.
+
+### Error minimisation for bias effects
+
+Error in a model is defined by the difference between an observed value and that which would be predicted by a model. For any given value $y$ and a prediction $\hat{y}$, the error $\epsilon$ for a single observation is described as follows:
+
+$$
+\epsilon = y - \hat{y}
+$$
+The error function is often adapted for optimisation purposes; for instance, on this occasion I the RMSE method above returns the square root of the sum of $\epsilon^2$ for all observations against their predicted values in the training set.
+
+The main independent variables, `userId`  and `movieId`, are treated as categorical factors, even though they are integers. A regularisation technique is applied, by using values of $\lambda$ (lambda). 
+The regularisation formula (described as penalisation in Irizarry(2019)) for movie bias $b_i$ at a given value of $\lambda$ is as follows:
+$$
+b_i (\lambda) = \frac{1}{\lambda + n} \sum (Y_i - \mu)
+$$
+This is computed by grouping by each movie using the `group_by()` command. It is not amenable to simplification by the computation of means.
+
+This value is chosen by iterating through various values of lambda and obtaining the lowest RMSE. This is therefore a 'least squares' approach. A similar method is used for user bias $b_u$ at a given $\lambda$ :
+$$
+b_u(\lambda) = \frac{1}{\lambda + n_{user}}\sum(Y_i - (\mu + b_i(\lambda)))
+$$
+This is computed by, having previously calculated all required values of $b_i$, mapping to the relevant whole training dataset by movie and grouping by each user using the `group_by()` command. It is computed user-wise, using different values of $b_u$ as appropriate. It is not amenable to simplification by the computation of means. When determining the value of $\lambda$ for such a calculation, it is generally more efficient to use the same value of $\lambda$ for both movie and user regularisation.
+
+### Determination of Predicted values
+
+Predicted values are determined as follows, for movie bias only and movie and user bias respectively:
+$$
+\hat{Y} = \mu + b_i
+$$
+
+$$
+\hat{Y} = \mu + b_i + b_u
+$$
+
+Where the values for user bias are either with or without regularisation. These values of $\hat{Y}$ may be used in order to evaluate the model using the RMSE function with $Y$ as the observed rating and $\hat{Y}$ being the predicted rating using the relevant bias factors ($b_i$ only or $b_i$ and $b_u$ as appropriate). The values of error $\epsilon$ may be determined by a method based on the differences between $Y$ and $\hat{Y}$ as described above.
+
+### Aims of the Project
+
+- To determine how much of the variation is determined by the user and movie bias effects.
+
+- To develop a model that may be used as is to make recommendations based on the highest ten regularised movie biases.
+
+The second objective would be fulfilled by the use of a table of the highest ten regularised movie biases, with additional information provided in the object-related model in order to provide for the possibility of filtering in order to customise the output to match the preferences of a particular user.
+
+\pagebreak
+# Methods
+
+## Packages used
+
+* `tidyverse` (including `dplyr` and `ggplot2` functions)
+* `knitr` was used to prepare tables (including calls to the `kable` function).
+* A call to `dslabs::ds_theme_set()` was used in order to standardise the theme of `ggplot2` plots.
+
+Code is adapted from Irizarry(2019).
+
+## Preparation etc. of Data
+The data was reviewed by use of the `head()` function as in the introduction above. The data was observed to be in a format one row per observation and is therefore consistent with the concept of tidy data. Additional transformations were not applied at the exploratory stage, however the number of ratings given by each user and received by each movie were determined in the summary stages.
+
+## Analysis of Data
+The dependent variable chosen was the rating. The measure of performance chosen was that of RMSE using the formula described in the introduction. The initial independent factors chosen were `movieId` and `userId` in unmodified form. For non-regularised values, the data was grouped by the relevant factor using the `group_by()` function with the relevant factor and any associated information to be retained. and a mean of differences from `mu` (population mean $\mu$ of the training set, computed using the code  
+`mu <- mean(edx$rating)`) and previous predicted factors, determined using the `summary()` function. RMSE as described in the introduction was used as the measure of performance. The sections of code used are reproduced in the results section below along with their output.
+
+### Inital Development Comparison of Models
+A  model using `mu` as the prediction for every value in the training set was made so as to compare the performance of other models. Any model whose RMSE exceeds this value is liable to be considered unsatisfactory. The RMSE from this model was stored as `simple_average`.
+
+Two non-regularised models were made, the first based on `movieId` only, and the second based on `movieId` and `userId`. RMSE was determined for each model and stored for later comparison. Where other information was retained, the `ungroup()` function was also used in order to prevent difficulty when making further use of the objects. These are referred to as the 'basic' models, and are stored as `basic_movie_only` and `basic_movie_user` respectively.
+
+### Application of Regularisation and further Comparison
+Regularisation methods were applied as described in the introduction. The first regularisation was for movie effects only, and the value of lambda that yields the lowest predicted RMSE from the training set was determined by iteration and stored as `lambda_movie`. A second model involved determining by iteration the value of lambda that minimises RMSE for both movie and user biases, this value of lambda was stored as `lambda_movie_user`. These models were reproduced at the relevant value of $\lambda$ , and the RMSES from these models stored as `reg_movie_only` and `reg_movie_user` respectively.
+
+These models were repeated using the values of lambda determined above, and used for formal determination of RMSE and additional tests of model performance. Additional tests involved the comparison of biases determined as above, plotting density charts of movie and user biases. The final model was determined by the overall lowest RMSE as the primary criterion, and verified by the use of other measures recorded in further analysis below.
+
+### Further analysis of Model Performance
+In addition, tables of the 'highest ten' and 'lowest ten' ratings were derived for movie biases, both the non-regularised model and also any values of lambda ($\lambda$)  accepted as optimising RMSE for a given set of bias effects. These include the number of ratings per movie, and were used to provide an additional assessment of model performance, on the basis that a movie should not appear with relatively few ratings. Local truncation was applied to the final tables using calls to `str_trunc`; this was performed table-wise immediately before display in order to leave the underlying objects intact.
+
+### Model Finalisation
+The performance of the models was reviewed, in terms of the following outputs:
+
+* Mimimum RMSE by tuning criteria
+* Usefulness of predictions ('highest ten' movies)
+* Consideration of other factors (regression plots between ratings per movie and movie bias and 'lowest ten' movies) for each model.
+
+An additional script was prepared so as to reproduce the predicted ratings and RMSE of the final model.
+
+## Methods of Plotting
+Plots were made of various input and output variables. Histograms of numbers of ratings per movie and ratings per user, and regression plots between number of ratings received and movie bias were made using the `ggplot2` package. Other plots, including a barplot, lambda vs RMSE scatterplots and density plots were made using base R plotting commands. Additional alterations were made so all plots as to optimise the legibility of the plots.
+
+For the regression plots, the locally estimated scatterplot smoothing (LOESS) method was used throughout.
+
+\pagebreak
+# Results
+
+### Computation of Basic (non-Regularised) Biases
+
+Let us obtain the basic (non-regularised) movie biases; this will also provide counts of ratings received by each movie (`n_movie`) . These are stored as columns in the objects `movie_avgs` and `user_avgs` respectively. These form the basis of the basic (i.e. non-regularised) movie bias effect model and movie and user bias effect model.
+
+```{R}
+#Obtain a basic (non-regularised) version of the movie bias effects.
+movie_avgs <- edx %>% 
+  group_by(movieId,title,genres) %>% 
+  summarize(b_i_basic = mean(rating - mu),n_movie = n()) %>%
+  ungroup()
+```
+
+Let us now repeat this for basic user biases, and also obtain counts of the number of ratings given by each unique user(`n_user`)
+
+```{R}
+#Let us repeat this for user averages (after basic movie effects)
+user_avgs <- edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u_basic = mean(rating - mu - b_i_basic),n_user = n())
+```
+
+
+\pagebreak
+### Additional Analysis of Variables based on Above Computations
+
+Let us consider the contents of `n_movie`, a vector that describes the number of ratings that a particular movie has received.
+
+```{R Analysis of n_movie, echo=FALSE}
+movie_avgs %>% ungroup() %>%
+  select(n_movie) %>% summary() %>% kable(format = 'markdown') 
+```
+
+
+```{R n_movie histogram, echo=FALSE}
+movie_avgs %>% ggplot(aes(n_movie)) + geom_histogram(bins = 50) +
+  ggtitle("A Histogram of the total number of Ratings received per movie") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    xlab("Ratings received per Movie") + ylab("Frequency")
+```
+
+\pagebreak
+Let us consider the contents `n_user`, the vector of number of movies rated by each user.
+
+```{R Derived Descriptive Statistics of Number of Ratings, echo=FALSE}
+#Let us repeat that, but with the number of movies rated by user:
+user_avgs %>% ungroup() %>%
+  select(n_user) %>% summary() %>% kable(format = 'markdown')
+```
+
+```{R echo=FALSE}
+user_avgs %>% ggplot(aes(n_user)) + geom_histogram(bins = 50) + 
+  ggtitle("A Histogram of the Number of Ratings given by each User") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Ratings given per User") + ylab("Frequency")
+```
+
+\pagebreak
+## Basic (non-Regularised) Effects Models
+
+We will use the the RMSE (Root Mean Squared Error) function from Irizarry (2019) to determine the accuracy of the model; lower values represent less total errors and therefore a better model. The simplest model is where every prediction is the training set population mean $\hat{y} = \bar{\mu}$, which is relatively poor but gives a baseline against which to compare other models. Only models with a lower RMSE (and therefore less total error) will be accepted. We will use the the RMSE (Root Mean Squared Error) function from Irizarry (2019) as described in the Introduction above:
+
+```{R Simple average model}
+#A simple average
+simple_average <- RMSE(validation$rating, mu)
+simple_average
+```
+
+This compares every value in `validation$rating` to `mu`, the population mean rating ($\mu$ of `edx$rating`) of the training set. It provides a high output of $`r simple_average`$, but will be used as a comparision for other models.
+
+### Computation of basic effect bias models
+
+Let us compute the basic models for both movie bias effect only and for movie and user bias effects.
+
+```{R Obtain Basic Movie Biases}
+#Movie effects only
+predicted_ratings_movie_basic <-validation %>% 
+  left_join(movie_avgs, by='movieId') %>% 
+  mutate (pred = b_i_basic + mu) %>% pull(pred)
+
+basic_movie_only <- RMSE(validation$rating, predicted_ratings_movie_basic)
+basic_movie_only
+```
+This provides predicted values giving a RMSE of `r basic_movie_only` for movie bias effect only.
+
+```{R}
+#Movie and user effects
+user_avgs <- edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u_basic = mean(rating - mu - b_i_basic),n_user = n())
+
+predicted_ratings_movie_user_basic <- 
+  validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i_basic + b_u_basic) %>%
+  pull(pred)
+
+basic_movie_user <- RMSE(validation$rating, predicted_ratings_movie_user_basic)
+basic_movie_user
+```
+This provides predicted values giving a RMSE of `r basic_movie_user` for movie and user bias effects.
+
+\pagebreak
+## Regularised Models
+
+### Computation for Movie Bias Effect only
+
+Let us consider the effect of various levels of lambda on the RMSE obtained, firstly on movie effects only.
+
+```{R RMSES for movie bias only}
+lambdas <- seq(0, 10, 0.25)
+
+rmses_movie_only <- sapply(lambdas, function(l){
+  
+  b_i <- edx %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  predicted_ratings <- 
+    validation %>% 
+    left_join(b_i, by = "movieId") %>%
+    mutate(pred = mu + b_i) %>%
+    pull(pred)
+  
+  return(RMSE(validation$rating, predicted_ratings))
+})
+```
+
+Let us compare the values of $\lambda$ to the RMSE obtained at each value for movie bias effects only.
+
+```{R echo=FALSE, fig.size = c(7.5,7)}
+#qplot(lambdas,rmses_movie_only, main = 'RMSEs movie only')
+plot(lambdas,rmses_movie_only,
+     main = 'RMSEs for different values of lambda on movie bias only',
+     pch=NA,xlab = 'Lambda',ylab = 'RMSE',ylim = c(0.94384,0.94400))
+grid(lty = 1)
+points(lambdas,rmses_movie_only,pch=20)
+```
+
+\pagebreak
+Let us obtain the relevant value of lambda and use this to produce an object `b_i_only`, which may then be used to confirm the effect of the optimised biasaes against the validation set and also for further analysis of the model performance.
+
+```{R}
+lambda_movie_only <- lambdas[which.min(rmses_movie_only)]
+
+b_i_only <- edx %>% 
+  group_by(movieId,title,genres) %>%
+  summarize(b_i_reg_movie = sum(rating - mu)/(n()+lambda_movie_only),n_movie = n()) %>%
+  ungroup()
+
+predicted_ratings_movie_reg <- 
+  validation %>% 
+  left_join(b_i_only, by = "movieId") %>%
+  mutate(pred = mu + b_i_reg_movie) %>%
+  pull(pred)
+
+reg_movie_only <- RMSE(validation$rating, predicted_ratings_movie_reg)
+reg_movie_only
+```
+
+This provides predicted values giving an optimum RMSE of `r reg_movie_only` at a regularisation parameter of $\lambda = `r lambda_movie_only`$. 
+
+\pagebreak
+### Computation for Movie and User Bias Effects
+
+Let us now repeat this for both movie and user effects, in that order.
+
+```{R}
+rmses_movie_User <- sapply(lambdas, function(l){
+  
+  b_i <- edx %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- edx %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  predicted_ratings <- 
+    validation %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+  
+  return(RMSE(validation$rating,predicted_ratings))
+})
+```
+
+Let us now compare the values of $\lambda$ to the RMSE obtained at each value for movie then user bias effects.
+
+```{R echo=FALSE}
+plot(lambdas,rmses_movie_User,pch=NA,
+     main = 'RMSEs for different values of lambda on movie and user biases',
+     xlab = 'lambda',ylab = 'RMSE',ylim=c(0.8648,0.8654))
+grid(ny = NA, lty = 1) # Following abline function calls complete grid
+abline(0.8648,0,col="lightgray")
+abline(0.865,0,col="lightgray")
+abline(0.8652,0,col="lightgray")
+abline(0.8654,0,col="lightgray")
+points(lambdas,rmses_movie_User,pch=20)
+```
+
+\pagebreak
+Let us obtain the relevant value of lambda and use this to produce the objects `b_i` and `b_u`, which may then be used to confirm the effect of the optimised biasaes against the validation set and also for further analysis of the model performance.
+
+```{R}
+lambda_movie_user <- lambdas[which.min(rmses_movie_User)]
+
+b_i <- edx %>% 
+  group_by(movieId,title,genres) %>%
+  summarize(b_i_reg = sum(rating - mu)/(n()+lambda_movie_user),n_movie = n()) %>%
+  ungroup()
+
+b_u <- edx %>% 
+  left_join(b_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u_reg = sum(rating - b_i_reg - mu)/(n()+lambda_movie_user))
+
+predicted_ratings_movie_user_reg <- 
+  validation %>% 
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  mutate(pred = mu + b_i_reg + b_u_reg) %>%
+  pull(pred)
+
+reg_movie_user <- RMSE(validation$rating,predicted_ratings_movie_user_reg)
+
+reg_movie_user
+```
+
+This provides predicted values giving an optimum RMSE of `r reg_movie_user` at a regularisation parameter of $\lambda = `r lambda_movie_user`$
+
+\pagebreak
+## Comparison of Basic and Regularised Models:
+
+Let us compare the basic models (i.e. without regularisation) to the regularised models (using a value of $\lambda$ so as to minimise RMSE:
+
+
+```{R Compare Model RMSEs, echo=FALSE}
+#Let us combine the simple average and movie bias effects only model:
+models <- rbind(simple_average,c(basic_movie_only,reg_movie_only))
+models <- rbind(models,c(basic_movie_user,reg_movie_user))
+rownames(models) = c('Average only','Movie bias effect only','Movie and user bias effects')
+colnames(models) <- c('Basic','Regularised')
+models %>% kable(format = 'markdown')
+```
+
+The lowest RMSE is observed in the regularised version of the movie and user effects bias models.
+
+\pagebreak
+## Comparison of the Effects of Regularisation
+
+Let us consider how the different levels of regularisation have affected the distribution of movie and user biases; the model optimised for RMSE on movie bias only has a $\lambda = `r lambda_movie_only`$ and the model optimised for RMSE on movie and user biases computed in that order has a $\lambda = `r lambda_movie_only`$. Let us first consider the relevant descriptive statistics and the shape of the density function for movie bias effects ($b_i$).
+
+```{R Compare Movie Biases, echo=FALSE}
+movie_avgs %>% ungroup() %>% select(-genres,-title) %>%
+  left_join((b_i_only %>% ungroup() %>% select(-n_movie,-title,-genres)),by='movieId') %>% 
+  left_join((b_i %>% ungroup() %>% select(-n_movie,-title,-genres)),by='movieId') %>% 
+  ungroup() %>% select(-movieId,-n_movie) %>%
+  summary() %>% kable(format = 'markdown')
+```
+
+```{R echo=FALSE}
+plot(density(movie_avgs$b_i_basic),xlab = 'Movie Bias', 
+     main = "Density Plot of Regularised Movie Biases",
+     ylim = c(0,max(density(b_i$b_i_reg)$y)))
+grid(lty = 1)
+lines(density(movie_avgs$b_i_basic),col = 'red')
+lines(density(b_i_only$b_i_reg_movie),col = 'brown')
+lines(density(b_i$b_i_reg),col = 'blue')
+legend(x=-3.3,y=0.85, title = 'Regularisation factor',
+       legend = c('not applied',paste("Lambda =", lambda_movie_only),
+       paste("Lambda =", lambda_movie_user)), bg = 'white',
+       col = c('red','brown','blue'),lty=1)
+```
+
+\pagebreak
+Let us now consider the effect of regulation on the descriptive statistics and the shape of density function of user bias effects ($b_u$):
+
+```{R Compare User Biases, echo=FALSE}
+user_avgs %>% left_join(b_u,by='userId') %>% 
+  ungroup() %>% select(-userId,-n_user) %>% summary() %>% kable(format = 'markdown')
+```
+
+
+
+```{R echo=FALSE}
+plot(density(user_avgs$b_u_basic),xlab = 'User Bias', 
+     main = "Density Plot of User Biases", col = 'red',
+     ylim = c(0,max(density(b_u$b_u_reg)$y)))
+lines(density(b_u$b_u_reg),col = 'blue')
+grid(lty = 1)
+legend(x=-3.58,y=1.16, title = 'Regularisation factor',
+       legend = c('not applied',paste("Lambda =", lambda_movie_user)),
+       bg = 'white',
+       col = c('red','blue'),lty=1)
+```
+
+\pagebreak
+### Ten highest-rated and ten lowest-rated derived from all models
+#### Basic Models (i.e. without regularisation)
+
+Let us consider the highest ten movie biases, without regularisation.
+
+```{R echo=FALSE}
+highest_ten_basic <- 
+  movie_avgs %>% arrange(desc(b_i_basic)) %>% ungroup() %>%
+    select(-movieId) %>% head(10) %>% 
+    mutate(title = str_trunc(title,37), 
+           genres = str_trunc(genres,25))
+
+highest_ten_basic %>% kable(format = 'markdown')
+```
+
+```{R Get 5th percentile, include=FALSE}
+percentile05 <- quantile(movie_avgs$n_movie,0.05)
+percentile05
+```
+
+Let us consider `n_movie`, the number of users who have reviewed a particular movie. These appear to be very low numbers, comapred to the descriptive statistics above. In particular, the 5th percentile of `n_movie` is $`r percentile05`$. This means that all ten movies have the same or fewer reviews than the 5th percentile. They are therefore all among the least-rated movies. Indeed, there are only a total of $`r sum(highest_ten_basic$n_movie)`$ for the movies with the highest ten average ratings (without regularisation).
+
+```{R echo=FALSE}
+lowest_ten_basic <- 
+  movie_avgs %>% arrange(b_i_basic) %>% ungroup() %>%
+    select(-movieId) %>% head(10) %>% 
+    mutate(title = str_trunc(title,37), 
+           genres = str_trunc(genres,25))
+
+lowest_ten_basic %>% kable(format = 'markdown')
+```
+
+All ten of the highest-rated (on average) movies are therefore in the lowest 5th percentile of ratings received, as are $`r sum(lowest_ten_basic$n_movie <= percentile05)`$ of the ten lowest-rated (on average) without regularisation. These movies have received $`sum(lowest_ten_basic$n_movie)`$ ratings between them.
+
+\pagebreak
+Let us consider the relationship between `n_movie` and the movie bias `b_i_basic` as computed without regularisation.
+
+```{r echo=FALSE}
+movie_avgs %>% ggplot(aes(n_movie,b_i_basic)) + geom_point(pch=20) +
+  geom_smooth(col='blue',method='loess',se=FALSE) + 
+  ggtitle('Relationship between Number of Reviews Received and 
+          Movie Bias without regularisation') +
+  xlab('Reviews Received per Movie') + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ylab('Final Regularised Movie Bias')
+```
+*Regression line (blue) calculated by LOESS method*
+
+\pagebreak
+#### Model with Regularisation optimised for RMSE on movie bias effect only
+
+```{R echo=FALSE}
+higest_ten_movie_only <- 
+  b_i_only %>% arrange(desc(b_i_reg_movie)) %>% ungroup() %>%
+    select(-movieId) %>% head(10)  %>% 
+    mutate(title = str_trunc(title,37), 
+           genres = str_trunc(genres,25))
+
+higest_ten_movie_only %>% kable(format = 'markdown')
+```
+
+```{R get 95th and 99th percentiles, include=FALSE}
+#Let us determine the 95th and 99th percentiles of `n_movie`, optimised for movies only.
+percentile95 <- quantile(movie_avgs$n_movie,0.95)
+
+percentile99 <- quantile(movie_avgs$n_movie,0.99)  
+```
+
+These have much higher numbers than without regularisation; indeed, it is helpful to obtain the 95th and 99th percentiles of `n_movie` for the overall training set. These are $`r round(percentile95,1)`$ and $`r round(percentile99,1)`$ respectively.
+
+It may be obsereved that `r sum(higest_ten_movie_only$n_movie > percentile95)` of these movies are above the 95th percentile, and of these `r sum(higest_ten_movie_only$n_movie > percentile99)` also exceed the 99th percentile. The sum of ratings received by these ten movies is `r sum(higest_ten_movie_only$n_movie)`.
+
+```{R echo=FALSE}
+lowest_ten_movie_only <-
+b_i_only %>% arrange(b_i_reg_movie) %>% ungroup() %>%
+    select(-movieId) %>% head(10)  %>% 
+    mutate(title = str_trunc(title,37), 
+           genres = str_trunc(genres,25))
+
+lowest_ten_movie_only %>% kable(format = 'markdown')
+```
+
+We can therefore see that regularisation has improved the highest and lowest ten movies by rating to those that have been viewed by a wider section of users. It may be observed that all these fall between the 5th and 95th percentiles of `r percentile05` and `r percentile95  %>% round(0)` respectively. It is also observed that there are a total of `r sum(lowest_ten_movie_only$n_movie)` ratings in this table, which is greater than without regularisation.
+
+\pagebreak
+Let us consider the relationship between `n_movie` and the computed, regularised movie bias `b_i_reg` as optimised for movie bias effect only.
+
+```{r echo=FALSE}
+b_i_only %>% ggplot(aes(n_movie,b_i_reg_movie)) + geom_point(pch=20) +
+  geom_smooth(col='blue',method='loess',se=FALSE) + 
+  ggtitle('Relationship between Number of Reviews Received and 
+          Regularised Movie Bias for Movie Bias Effect Only') +
+  xlab('Reviews Received per Movie') + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ylab('Final Regularised Movie Bias')
+```
+*Regression line (blue) calculated by LOESS method*
+
+\pagebreak
+#### Model with Regularisation optimised for RMSE on movie and user bias effects
+
+```{R echo=FALSE}
+higest_ten_movie_user <- 
+  b_i %>% arrange(desc(b_i_reg)) %>% ungroup() %>%
+    select(-movieId) %>% head(10) %>% 
+    mutate(title = str_trunc(title,37), 
+           genres = str_trunc(genres,25))
+
+higest_ten_movie_user %>% kable(format = 'markdown')
+```
+
+It may be observed that there are `r sum(higest_ten_movie_user$n_movie)` total ratings given to the highest ten movies. Of these, `r sum(higest_ten_movie_user$n_movie > percentile95)` have more than the 95th percentile of ratings and `r sum(higest_ten_movie_user$n_movie > percentile99)` have more than the 99th percentile of ratings.
+
+```{R echo=FALSE}
+lowest_ten_movie_user <- 
+  b_i %>% arrange(b_i_reg) %>% ungroup() %>%
+    select(-movieId) %>% head(10)  %>% 
+    mutate(title = str_trunc(title,37), 
+           genres = str_trunc(genres,25))
+
+lowest_ten_movie_user %>% kable(format = 'markdown')
+```
+
+As for the earlier model with regularisation optimised for movie bias effects only, it may be observed that all these fall between the 5th and 95th percentiles of `r percentile05` and $`r percentile95 %>% round(1)`$ respectively. It is also observed that there are a total of `r sum(lowest_ten_movie_user$n_movie)` ratings in this table, which is greater than with regularisation for movie effects only.
+
+We see a similar effect produced when optimising for RMSE based on both user and movie bias effects; however we do not notice any movies with fewer than 30 individual ratings (the first quartile) received in either category.
+
+\pagebreak
+Let us consider the relationship between `n_movie` and the computed, regularised movie bias `b_i_reg` as optimised for movie and user bias effects.
+
+```{r echo=FALSE}
+b_i %>% ggplot(aes(n_movie,b_i_reg)) + geom_point(pch=20) +
+  geom_smooth(col='blue',method='loess',se=FALSE) + 
+  ggtitle('Relationship between Number of Reviews Received and 
+          Regularised Movie Bias for Movie and User Effects') +
+  xlab('Reviews Received per Movie') + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  ylab('Final Regularised Movie Bias')
+```
+*Regression line (blue) calculated by LOESS method*
+
+\pagebreak
+# Confirmation of Output Model
+
+The model that is selected is that of regularised movie and user bias effects, with a regularistaion parameter of $\lambda = `r lambda_movie_user`$. This yields a RMSE of **$`r reg_movie_user`$**. The descriptive statistics of the predicted values of the final model are as follows:
+
+```{r echo=FALSE}
+prediction_summmary <- predicted_ratings_movie_user_reg %>% as.data.frame() %>% 
+  summary()
+  
+colnames(prediction_summmary) <- "Predicted Rating"
+
+prediction_summmary %>% kable(format = 'markdown')
+```
+In addition, there are `r sum(predicted_ratings_movie_user_reg<0.5)` predictions below the minimum possible value of 0.5 and `r sum(predicted_ratings_movie_user_reg>5)` predictions above the maximum possible value of 5.
+
+
+
+
+
+
+\pagebreak
+# Discussion and Conclusions
+
+It is observed that the inclusion of both movie and user biases provides a better performance (measured by a lower RMSE), both with and without regularisation. It is also observed that regulariaation provides further, albeit small, improvement in performance as measured by a reduction in RMSE. We can observe from the density plots above that this also reduces the proportion of outlying movie biases, with a more central distribution of biases for both movie and user effects. This reduces the distorting effect of a relatively small number of high or low ratings. This is reflected in the less extreme minimum and maximum values of biases as greater levels of regularisation are applied.
+
+This may also be observed by considering the `n_movie` values observed in the top ten and lowest ten provided; there is a general increase in the value of `n_movie` as higher levels of regularisation are applied. This is more pronounced for the highest ten movies; the un-regularised top 10 has a total of 21 movies (a mean of just over 2 ratings per movie) whereas the final model (regularised by lambda for optimum RSE) yields an total n_movie of 119,384. This represents an increase of over a thousand-fold. However, there are more total ratings per movie in the non-regularised lowest ten movies, and the effect of regularisation is such that the total `n_movie` value increases less than tenfold with regularisation applied to both movie and user bias effects. This is most obvious when viewing the regression plots of number of ratings received per movie against movie bias both before and after regularisation; there are a few points protruding for non-regularised biases at very low levels of reviews per movie for non-regularised movie biases, but these do not appear to protrude on the regression plot between the number of ratings received and regularised movie biases.
+
+It is also noted that this is higher for the top ten than the lowest ten; this also suggests that movies that are enjoyed by a large number of users may still receive a higher rating. It is also notable that movies that are repeatedly unpopular will still receive a lower rating; however it is necessary for repeated adverse ratings to be given for this to occur. This is more consistent with good movies receiving consistently better ratings and also a greater number of ratings. This suggests that the movies in the highest ten chart based on regularised movie biases are so highly rated because they are considered by the people giving the ratings to be good movies.
+
+\pagebreak
+# References and Bibliography
+
+Irizarry, R. 2019. *Introduction to Data Science* as published at [https://rafalab.github.io/dsbook/](https://rafalab.github.io/dsbook/) and linked pages on the same website. Also sample code from [https://github.com/rafalab/dsbook](https://github.com/rafalab/dsbook) was consulted.
+
+Wickham, H., 2014. Tidy data. *Journal of Statistical Software*, 59(10), pp.1-23.
+
+## Data Sources
+MovieLens 10M Dataset from GroupLens per [https://grouplens.org/datasets/movielens/10m/](https://grouplens.org/datasets/movielens/10m/)
